@@ -63,6 +63,10 @@ module Elasticsearch
       #
       # @option arguments [Hash] :transport_options Options to be passed to the `Faraday::Connection` constructor
       #
+      # @option arguments [Integer] :pool_size Add a pool size greater than 0 to wrap the connection with a ConnectionPool
+      #
+      # @option arguments [Integer] :pool_timeout Set a timeout for connections in a ConnectionPool
+      #
       # @option arguments [Constant] :transport_class  A specific transport class to use, will be initialized by
       #                                                the client and passed hosts and all arguments
       #
@@ -84,16 +88,22 @@ module Elasticsearch
         arguments[:reload_on_failure]  ||= false
         arguments[:randomize_hosts]    ||= false
         arguments[:transport_options]  ||= {}
+        arguments[:pool_size]          ||= 0
+        arguments[:pool_timeout]       ||= 1
 
         transport_class  = arguments[:transport_class] || DEFAULT_TRANSPORT_CLASS
 
         @transport       = arguments[:transport] || begin
           if transport_class == Transport::HTTP::Faraday
-            transport_class.new(:hosts => __extract_hosts(hosts, arguments), :options => arguments) do |faraday|
-              faraday.adapter(arguments[:adapter] || __auto_detect_adapter)
+            __maybe_build_connection_pool(arguments[:pool_size], arguments[:pool_timeout]) do
+              transport_class.new(:hosts => __extract_hosts(hosts, arguments), :options => arguments) do |faraday|
+                faraday.adapter(arguments[:adapter] || __auto_detect_adapter)
+              end
             end
           else
-            transport_class.new(:hosts => __extract_hosts(hosts, arguments), :options => arguments)
+            __maybe_build_connection_pool(arguments[:pool_size], arguments[:pool_timeout]) do
+              transport_class.new(:hosts => __extract_hosts(hosts, arguments), :options => arguments)
+            end
           end
         end
       end
@@ -101,7 +111,11 @@ module Elasticsearch
       # Performs a request through delegation to {#transport}.
       #
       def perform_request(method, path, params={}, body=nil)
-        transport.perform_request method, path, params, body
+        if __connection_pool_defined? && transport.is_a?(ConnectionPool)
+          transport.with { |t| t.perform_request method, path, params, body }
+        else
+          transport.perform_request method, path, params, body
+        end
       end
 
       # Normalizes and returns hosts configuration.
@@ -162,6 +176,31 @@ module Elasticsearch
           :net_http_persistent
         else
           ::Faraday.default_adapter
+        end
+      end
+
+      # Helper method to test whether the connection_pool library is available
+      #
+      # @return [Boolean]
+      #
+      # @api private
+      #
+      def __connection_pool_defined?
+        defined?(ConnectionPool)
+      end
+
+      # Helper method to create a connection pool if a pool size is specified
+      # otherwise return a normal transport object
+      #
+      # @return [ConnectionPool or Transport]
+      #
+      # @api private
+      #
+      def __maybe_build_connection_pool(size = 0, timeout = 1, &block)
+        if size > 0 && __connection_pool_defined?
+          ConnectionPool.new(:size => size, :timeout => timeout, &block)
+        else
+          block.call
         end
       end
     end
